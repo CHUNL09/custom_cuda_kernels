@@ -15,6 +15,29 @@ __global__ void sum_native_kernel(const float* input, float* output, int N){
     }
 }
 
+
+__global__ void reduce_sum_smem_tree(const float* input, float* output, int N){
+    tid = threadIdx.x;
+    idx = blockDim.x * blockIdx.x + tid;
+    __shared__ float smem[blockDim.x];
+    if (idx < N){
+        smem[tid] = input[idx];
+    }else{
+        smem[tid] = 0.0f;
+    }
+    __syncthreads();
+    for(int offset = blockDim.x >> 1; offset > 0; offset >>= 1){
+        if(tid < offset){
+            smem[tid] += smem[tid + offset];
+        }
+        __syncthreads();
+    }
+    if(tid == 0){
+        atomicAdd(output, smem[0]);
+    }
+}
+
+
 int main(){
     const size_t N = 1000000;
     float* h_nums = (float*)malloc(N * sizeof(float));
