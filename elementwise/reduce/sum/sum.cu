@@ -17,9 +17,9 @@ __global__ void sum_native_kernel(const float* input, float* output, int N){
 
 
 __global__ void reduce_sum_smem_tree(const float* input, float* output, int N){
-    tid = threadIdx.x;
-    idx = blockDim.x * blockIdx.x + tid;
-    __shared__ float smem[blockDim.x];
+    int tid = threadIdx.x;
+    int idx = blockDim.x * blockIdx.x + tid;
+    extern __shared__ float smem[];
     if (idx < N){
         smem[tid] = input[idx];
     }else{
@@ -38,17 +38,45 @@ __global__ void reduce_sum_smem_tree(const float* input, float* output, int N){
 }
 
 
+__global__ void reduce_sum_smem_tree_v2(const float* input, float* output, int N){
+    int tid = threadIdx.x;
+    int idx = blockDim.x * blockIdx.x + tid;
+    extern __shared__ float smem[];
+
+    float sum = 0.0f;
+    if(idx * 4 + 3 < N){
+        const float4 tmp = reinterpret_cast<const float4*>(&input[idx * 4])[0];
+        sum = tmp.x + tmp.y + tmp.z + tmp.w;
+    }else{
+        for(int i = idx * 4; i< N; i++){
+            sum += input[i];
+        }
+    }
+
+    smem[tid] = sum;
+    __syncthreads();
+    for(int offset = blockDim.x >> 1; offset > 0; offset >>= 1){
+        if(tid < offset){
+            smem[tid] += smem[tid + offset];
+        }
+        __syncthreads();
+    }
+    if(tid == 0){
+        atomicAdd(output, smem[0]);
+    }
+}
+
+
 int main(){
     const size_t N = 1000000;
     float* h_nums = (float*)malloc(N * sizeof(float));
-    float* sum = (float*)malloc(sizeof(float));
+    double sum = 0.0;
     float* h_sum = (float*)malloc(sizeof(float));
-    *sum = 0.0f;
     for(size_t i=0; i< N; i++){
         h_nums[i] = (float)i;
-        *sum += h_nums[i];
+        sum += h_nums[i];
     }
-    std::cout << "sum: " << *sum << std::endl;
+    std::cout << "sum: " << sum << std::endl;
 
     float* d_sum = nullptr;
     float* d_nums = nullptr;
@@ -60,15 +88,21 @@ int main(){
 
     int blockSize = 32 * 32;
     int gridSize = (N + blockSize - 1)/blockSize;
-    sum_native_kernel<<<gridSize, blockSize>>>(d_nums, d_sum, N);
+    int smem_size = blockSize * sizeof(float);
+    reduce_sum_smem_tree<<<gridSize, blockSize, smem_size>>>(d_nums, d_sum, N);
     cudaCheck(cudaMemcpy(h_sum, d_sum, sizeof(float), cudaMemcpyDeviceToHost));
 
+    /*
+    int elements_per_block = blockSize * elements_per_thread;  // 4096 元素/block
+    int gridSize = (N + elements_per_block - 1) / elements_per_block;
+    reduce_sum_smem_tree_v2<<<gridSize, blockSize, smem_size>>>(d_nums, d_sum, N);
+    cudaCheck(cudaMemcpy(h_sum, d_sum, sizeof(float), cudaMemcpyDeviceToHost));
+    */
     std::cout << "Cuda sum: " << *h_sum << std::endl;
 
     cudaCheck(cudaFree(d_sum));
     cudaCheck(cudaFree(d_nums));
     free(h_nums);
-    free(sum);
     free(h_sum);
     return 0;
 }
