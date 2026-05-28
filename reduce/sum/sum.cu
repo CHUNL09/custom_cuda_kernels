@@ -1,6 +1,8 @@
 #include <cuda_runtime.h>
 #include <iostream>
 
+#define WARP_SIZE 32
+
 void cudaCheck(cudaError_t err){
     if(err != cudaSuccess){
         std::cerr << "cuda error: "<< cudaGetErrorString(err) << std::endl;
@@ -63,6 +65,63 @@ __global__ void reduce_sum_smem_tree_v2(const float* input, float* output, int N
     }
     if(tid == 0){
         atomicAdd(output, smem[0]);
+    }
+}
+
+
+__global__ void sum_warp_shf_kernel(const float* input, float* output, int N){
+    __shared__ float s_y[32];
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    int warpId = threadIdx.x / WARP_SIZE;
+    int laneId = threadIdx.x % WARP_SIZE;
+
+    float val = (idx < N) ? input[idx]: 0.0f;
+    for(int offset=WARP_SIZE >> 1; offset > 0; offset >>=1){
+        val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+    }
+    if(laneId == 0) s_y[warpId] = val;
+    __syncthreads();
+    if(warpId == 0){
+        int warpNum = blockDim.x / WARP_SIZE;
+        val = (laneId < warpNum) ? s_y[laneId]: 0.0f;
+        for(int offset=WARP_SIZE >> 1; offset > 0; offset >>=1){
+            val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+        }
+        if(laneId == 0) atomicAdd(output, val);
+    }
+
+}
+
+
+__global__ void sum_warp_shf_float4_kernel(const float* input, float* output, int N){
+    __shared__ float s_y[32];
+    int tid = threadIdx.x;
+    int idx = blockDim.x * blockIdx.x + tid;
+    int warpId = tid / WARP_SIZE;
+    int laneId = tid % WARP_SIZE;
+
+    int idx_vec = idx * 4;
+    float val = 0.0f;
+    if(idx_vec + 3 < N){
+        const float4 tmp = reinterpret_cast<const flaot4*>(&input[idx_vec])[0];
+        val = tmp.x + tmp.y + tmp.z + tmp.w;
+    }else{
+        for(int i = idx_vec; i< N; i++){
+            val += input[i];
+        }
+    }
+    for(int offset=WARP_SIZE >> 1; offset > 0; offset >>=1){
+        val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+    }
+    if(laneId == 0) s_y[warpId] = val;
+    __syncthreads();
+    if(warpId == 0){
+        int warpNum = blockDim.x / WARP_SIZE;
+        val = (laneId < warpNum) ? s_y[laneId]: 0.0f;
+        for(int offset=WARP_SIZE >> 1; offset > 0; offset >>=1){
+            val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+        }
+        if(laneId == 0) atomicAdd(output, val);
     }
 }
 
