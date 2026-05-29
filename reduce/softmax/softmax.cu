@@ -2,6 +2,33 @@
 #include <cuda_runtime.h>
 
 
+void softmax_cpu(const float* input, float* output, size_t N){
+    float max_val = *(std::max_element(input, input + N));
+    float sum = 0.0f;
+    for(int i=0; i<N; i++){
+        output[i] = expf(input[i] - max_val);
+        sum += output[i];
+    }
+    for(int i=0; i<N; i++){
+        output[i] /= sum;
+    }
+}
+
+
+__device__ float atomicMaxFloat(float* addr, float value){
+    int* addr_as_int = reinterpret_cast<int*>(addr);
+    int old = *addr_as_int;
+    int assumed;
+
+    do{
+        assumed = old;
+        float max_val = fmaxf(value, __int_as_float(assumed));
+        old = atomicCAS(addr_as_int, assumed, __float_as_int(max_val));
+    }while(old != assumed);
+    return __int_as_float(old);
+}
+
+
 __global__ void softmax_max_kernel(const float* input, float* max_val, size_t N){
     int tid = threadIdx.x;
     int idx = blockDim.x * blockIdx.x + tid;
@@ -19,7 +46,7 @@ __global__ void softmax_max_kernel(const float* input, float* max_val, size_t N)
         }     
     }
     if(tid == 0){
-        atomicMax(max_val, smem[0]);
+        atomicMaxFloat(max_val, smem[0]);
     }
 }
 
