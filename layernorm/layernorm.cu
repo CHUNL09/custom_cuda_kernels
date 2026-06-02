@@ -112,6 +112,89 @@ __global__ void layernorm_v2(float* output, float* input, float* gamma, float* b
 }
 
 
+__global__ void layernorm_v3(float* output, float* input, float* gamma, float* beta, int batch, int features, float eps){
+    // Using shared memory and let each thread to handle more features
+    // also using float4 
+    int tid = threadIdx.x; 
+    int batch_id = blockIdx.x;
+    if(batch_id >= batch) return;
+    float* x = input + batch_id * features;
+    float* out = output + batch_id * features;
+    int vec_nums = features / 4;
+    extern __shared__ float smem[];
+    
+    int tail_offset = vec_nums * 4;
+    int tail = features - tail_offset;
+
+    float sum = 0.0f;
+
+    for(int i=tid; i<vec_nums; i += blockDim.x){
+        float4 vec = reinterpret_cast<float4*>(x)[i];
+        sum += vec.x + vec.y + vec.z + vec.w;
+    }
+    for(int i=tid; i<tail; i+=blockDim.x){
+        sum += x[tail_offset + i];
+    }
+    smem[tid] = sum;
+    __syncthreads();
+    for(int offset=blockDim.x >> 1; offset>0; offset>>=1){
+        if(tid < offset){
+            smem[tid] += smem[tid + offset];
+            __syncthreads();
+        }
+    }
+    float inv_features = 1.0f / features;
+    float mean = smem[0] * inv_features;
+
+    float var = 0.0f;
+    for(int i=tid; i<vec_nums; i+=blockDim.x){
+        float4 vec = reinterpret_cast<float4*>(x)[i];
+        float diff_x = vec.x - mean;
+        float diff_y = vec.y - mean;
+        float diff_z = vec.z - mean;
+        float diff_w = vec.w - mean;
+        var += diff_x * diff_x + diff_y * diff_y + diff_z * diff_z + diff_w * diff_w;
+    }
+
+    for(int i=tid; i<tail; i+=blockDim.x){
+        float diff = x[tail_offset + i] - mean;
+        var += diff * diff;
+    }
+    smem[tid] = var;
+    __syncthreads();
+    for(int offset=blockDim.x >> 1; offset>0; offset>>=1){
+        if(tid < offset){
+            smem[tid] += smem[tid + offset];
+            __syncthreads();
+        }
+    }
+    var = smem[0] * inv_features;
+    float inv_sqrt_var = 1.0f/ sqrtf(var + eps);
+    for(int i=tid; i<vec_nums; i+=blockDim.x){
+        float4 vec = reinterpret_cast<float4*>(x)[i];
+        float4 norm;
+        norm.x = inv_sqrt_var * (vec.x - mean);
+        norm.y = inv_sqrt_var * (vec.y - mean);
+        norm.z = inv_sqrt_var * (vec.z - mean);
+        norm.w = inv_sqrt_var * (vec.w - mean);
+        float4 gamma_vec = reinterpret_cast<float4*>(gamma)[i];
+        float4 beta_vec = reinterpret_cast<float4*>(beta)[i];
+
+        float4 output_vec;
+        output_vec.x = norm.x * gamma_vec.x + beta_vec.x;
+        output_vec.y = norm.y * gamma_vec.y + beta_vec.y;
+        output_vec.z = norm.z * gamma_vec.z + beta_vec.z;
+        output_vec.w = norm.w * gamma_vec.w + beta_vec.w;
+        reinterpret_cast<float4*>(out)[i] = output_vec;
+    }
+    
+    for(int i=tid; i<tail; i+=blockDim.x){
+        int idx = tail_offset + i;
+        float val = (x[idx] - mean) * inv_sqrt_var;
+        out[idx] = val * gamma[idx] + beta[idx];
+    }
+}
+
 int main(){
     int batch = 64; 
     int features = 128;
