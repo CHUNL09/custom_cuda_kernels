@@ -58,3 +58,94 @@ __global__ void sgemm_semm(const float* A, const float* B, float* C, int M, int 
     int C_col = bx * BN + tx;
     C[OFFSET(C_row, C_col, N)] = sum;
 }
+
+
+template<const int BM, const int BN, const int BK>
+__global__ void sgemm_semm_v2(const float* A, const float* B, float* C, int M, int N, int K){
+    __shared__ float As[BM][BK];
+    __shared__ float Bs[BK][BN];
+
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+
+    A = &A[(by * BM) * K];
+    B = &B[bx * BN];
+    C = &C[by * BM * N + bx * BN];
+    float sum = 0.0f;
+    for(int k=0; k< K; k += BK){
+
+        As[ty][tx] = A[ty * K + tx];
+
+        Bs[ty][tx] = B[ty * N + tx];
+
+        __syncthreads();
+        A += BK;
+        B += BK * N;
+
+        for(int j=0; j< BK; j++){
+            sum += As[ty][j] * Bs[j][tx];
+        }
+    }
+    C[ty * N + tx] = sum;
+}
+
+
+template<const int BM, const int BN, const int BK, const int TM, const int TN>
+__global__ void sgemm_thread_tile(const float* A, const float* B, float* C, int M, int N, int K){
+    __shared__ float As[BM][BK];
+    __shared__ float Bs[BK][BN];
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    
+    int block_row_thread = BN / TN;
+    int block_col_thread = BM / TM;
+    int thread_num = block_row_thread * block_col_thread;
+
+    int tx = (threadIdx.x % block_row_thread) * TN;
+    int ty = (threadIdx.x / block_row_thread) * TM;
+    
+    //A[BM][BK]
+    A = &A[by * BM * K];
+    //B[BK][BN]
+    B = &B[bx * BN];
+    //C[BM][BN]
+    C = &C[by * BM * N + bx * BN];
+
+    int a_tile_row = threadIdx.x / BK;
+    int a_tile_col = threadIdx.x % BK;
+    int a_tile_stride = threadIdx.x / BK;
+
+    int b_tile_row = threadIdx.x / BN;
+    int b_tile_col = threadIdx.x % BN;
+    int b_tile_stride = threadIdx.x / BN;
+
+    float accum[TM][TN] = {0.0f};
+    for(int k=0; k< K; k+= BK){
+        for(int i=0; i< BM; i += a_tile_stride){
+            As[a_tile_row + i][a_tile_col] = A[(a_tile_row + i)*K + a_tile_col];
+        }
+        for(int i=0; i< BK; i += b_tile_stride){
+            Bs[b_tile_row + i][b_tile_col] = B[(b_tile_row + i)*N + b_tile_col];
+        }
+        __syncthreads();
+        A += BK;
+        B += BK * N;
+        for(int row=0; row < TM; row++){
+            for(int col=0; col < TN; col++){
+                for(int i=0; i< BK; i++){
+                    accum[row][col] += As[ty+row][i] * Bs[i][tx+ col];
+                }
+            }
+        }
+        __syncthreads();
+    }
+    for(int row=0; row < TM; row++){
+        for(int col=0; col < TN; col++){
+            C[(ty + row) * N + (tx + col)] = accum[row][col];
+        }
+    }   
+}
+
+
