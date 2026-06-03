@@ -231,6 +231,12 @@ __global__ void layernorm_v5(float* output, float* input, float* gamma, float* b
     }
 }
 
+/*
+下一步可能的优化方向
+1.异步内存拷贝：使用cudaMemcpyAsync和双缓冲
+2.CUDA Graphs：减少kernel launch开销
+3.融合操作：将LayerNorm融合到前面的算子中
+*/
 
 int main(){
     int batch = 64; 
