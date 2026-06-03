@@ -195,6 +195,43 @@ __global__ void layernorm_v3(float* output, float* input, float* gamma, float* b
     }
 }
 
+
+__global__ void layernorm_v5(float* output, float* input, float* gamma, float* beta, int batch, int features, float eps){
+    // Using warp shuffle to avoid shared memory
+    int warpId = threadIdx.x / WARP_SIZE;
+    int laneId = threadIdx.x % WARP_SIZE;
+    int batch_id = blockIdx.x * (blockDim.x / WARP_SIZE) + warpId;
+
+    if(batch_id >= batch) return;
+
+    float* x = input + batch_id * features;
+    float* out = output + batch_id * features;
+
+    float sum = 0.0f;
+    for(int i=laneId; i<features; i+=WARP_SIZE){
+        sum += x[i];
+    }
+    for(int offset=WARP_SIZE >> 1; offset>0; offset>>=1){
+        sum += __shfl_xor_sync(0xFFFFFFFF, sum, offset);
+    }
+    float inv_features = 1.0f / features;
+    float mean = sum * inv_features;
+    float var = 0.0f;
+    for(int i=laneId; i<features; i+=WARP_SIZE){
+        float diff = x[i] - mean;
+        var += diff * diff;
+    }
+    for(int offset=WARP_SIZE>>1; offset>0; offset >>=1){
+        var += __shfl_xor_sync(0xFFFFFFFF, var, offset);
+    }
+    var = inv_features * var;
+    float inv_sqrt_var = 1.0f/ sqrtf(var + eps);
+    for(int i=laneId; i<features; i+=WARP_SIZE){
+        out[i] = (x[i] - mean) * inv_sqrt_var * gamma[i] + beta[i];
+    }
+}
+
+
 int main(){
     int batch = 64; 
     int features = 128;
